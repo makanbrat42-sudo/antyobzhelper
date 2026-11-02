@@ -1,0 +1,618 @@
+// AntyObzhelp — схема базы данных.
+// Все даты хранятся в UTC (timestamptz).
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "esm"
+  runtime      = "nodejs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Сотрудники и доступ ─────────────────────────────
+
+enum UserStatus {
+  PENDING // ожидает одобрения регистрации
+  ACTIVE
+  REJECTED // регистрация отклонена
+  BLOCKED
+}
+
+enum RoleKind {
+  MAIN // основная должность
+  CALLER // должность обзвонщика
+}
+
+model User {
+  id                 String     @id @default(cuid())
+  vkId               String     @unique
+  nickname           String
+  firstName          String?
+  lastName           String?
+  avatarUrl          String?
+  discordId          String?    @unique
+  status             UserStatus @default(PENDING)
+  blockedReason      String?
+  vkMessagesAllowed  Boolean? // результат messages.isMessagesFromGroupAllowed
+  vkMessagesCheckedAt DateTime? @db.Timestamptz(3)
+  createdAt          DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime   @updatedAt @db.Timestamptz(3)
+  lastLoginAt        DateTime?  @db.Timestamptz(3)
+
+  roles                UserRole[]
+  permissionOverrides  UserPermission[]
+  sessions             Session[]
+  registrationRequests RegistrationRequest[]  @relation("RegistrationUser")
+  reviewedRegistrations RegistrationRequest[] @relation("RegistrationReviewer")
+  leadership           LeadershipMember?
+  decisions            ApplicationDecision[]
+  assignments          ApplicationAssignment[] @relation("AssignmentUser")
+  assignmentsMade      ApplicationAssignment[] @relation("AssignmentBy")
+  currentApplications  Application[]          @relation("CurrentAssignee")
+  decidedApplications  Application[]          @relation("DecidedBy")
+  notifiedApplications Application[]          @relation("NotifiedBy")
+  callSessions         CallSession[]
+  callResults          CallResult[]
+  comments             ApplicationComment[]
+  auditLogs            AuditLog[]
+  notifications        Notification[]
+  deliveries           IntegrationDelivery[]
+  events               ApplicationEvent[]
+  liftedCooldowns      CooldownRestriction[]  @relation("CooldownLiftedBy")
+  serviceTokens        ServiceToken[]
+  settingsUpdated      SystemSetting[]
+  botStates            BotConversationState[]
+
+  @@index([status])
+}
+
+model Role {
+  id          String           @id @default(cuid())
+  key         String           @unique
+  name        String
+  kind        RoleKind
+  color       String           @default("#8B5CF6")
+  sortOrder   Int              @default(0)
+  isSystem    Boolean          @default(false)
+  createdAt   DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime         @updatedAt @db.Timestamptz(3)
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@index([kind, sortOrder])
+}
+
+model Permission {
+  id          String           @id @default(cuid())
+  key         String           @unique
+  description String
+  group       String
+  roles       RolePermission[]
+  overrides   UserPermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+// Одна основная и одна должность обзвонщика на сотрудника: уникальность (userId, kind).
+model UserRole {
+  id        String   @id @default(cuid())
+  userId    String
+  roleId    String
+  kind      RoleKind
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, kind])
+  @@index([roleId])
+}
+
+// Индивидуальная выдача (granted=true) или запрет (granted=false) разрешения.
+model UserPermission {
+  userId       String
+  permissionId String
+  granted      Boolean
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionId])
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  userId     String
+  expiresAt  DateTime @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  lastSeenAt DateTime @default(now()) @db.Timestamptz(3)
+  userAgent  String?
+  ip         String?
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+enum RegistrationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model RegistrationRequest {
+  id           String             @id @default(cuid())
+  userId       String
+  status       RegistrationStatus @default(PENDING)
+  createdAt    DateTime           @default(now()) @db.Timestamptz(3)
+  reviewedAt   DateTime?          @db.Timestamptz(3)
+  reviewedById String?
+  comment      String?
+  user         User               @relation("RegistrationUser", fields: [userId], references: [id], onDelete: Cascade)
+  reviewedBy   User?              @relation("RegistrationReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+// «Руководство КП» — кому VK-бот присылает заявки и кто может принимать/отклонять.
+model LeadershipMember {
+  id                  String   @id @default(cuid())
+  userId              String   @unique
+  receiveApplications Boolean  @default(true)
+  canApprove          Boolean  @default(false)
+  canReject           Boolean  @default(false)
+  createdAt           DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime @updatedAt @db.Timestamptz(3)
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Сервисная авторизация внешних ботов (Discord). Хранится только хеш токена.
+model ServiceToken {
+  id          String    @id @default(cuid())
+  name        String
+  tokenHash   String    @unique
+  tokenPrefix String
+  scopes      String[]
+  createdById String?
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  lastUsedAt  DateTime? @db.Timestamptz(3)
+  revokedAt   DateTime? @db.Timestamptz(3)
+  createdBy   User?     @relation(fields: [createdById], references: [id], onDelete: SetNull)
+}
+
+// ───────────────────────────── Кандидаты и заявки ─────────────────────────────
+
+model Candidate {
+  id            String    @id @default(cuid())
+  vkId          String    @unique // числовой VK ID — единственный ключ идентификации
+  vkScreenName  String?
+  nickname      String?
+  fullName      String?
+  discordId     String?   @unique
+  vkVerifiedAt  DateTime? @db.Timestamptz(3) // владение подтверждено через VK ID OAuth
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @db.Timestamptz(3)
+
+  applications Application[]
+  cooldowns    CooldownRestriction[]
+  events       ApplicationEvent[]
+  linkCodes    CandidateLinkCode[]
+
+}
+
+// Коды подтверждения VK: кандидат входит через VK ID и получает код для анкеты / Discord.
+model CandidateLinkCode {
+  id          String    @id @default(cuid())
+  code        String    @unique
+  candidateId String
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+  expiresAt   DateTime  @db.Timestamptz(3)
+  usedAt      DateTime? @db.Timestamptz(3)
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId])
+}
+
+enum ApplicationStatus {
+  IDENTITY_CHECK // требуется ручная проверка VK ID
+  PENDING_REVIEW
+  APPROVED_WAITING_CALLER
+  ASSIGNED
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+  AUTO_REJECTED_COOLDOWN
+  CANCELLED
+}
+
+enum ApplicationSource {
+  GOOGLE_FORMS
+  MANUAL
+  DISCORD
+}
+
+enum IdentityStatus {
+  VERIFIED // VK ID подтверждён кандидатом через OAuth (код)
+  LINK_RESOLVED // VK ID получен из ссылки в анкете (владение не подтверждено)
+  UNRESOLVED // не удалось определить
+  CONFLICT // данные анкеты противоречат друг другу
+  MANUAL // VK ID подтверждён администратором вручную
+}
+
+enum ActorType {
+  USER
+  SYSTEM
+  BOT
+  SERVICE
+}
+
+model Application {
+  id                 Int               @id @default(autoincrement())
+  candidateId        String?
+  // Совпадает с candidateId, пока заявка активна; NULL после завершения.
+  // Уникальность гарантирует не более одной активной заявки на кандидата.
+  activeCandidateKey String?           @unique
+  source             ApplicationSource @default(GOOGLE_FORMS)
+  externalId         String? // ID ответа Google Forms
+  nickname           String
+  fullName           String?
+  vkProfileRaw       String?
+  vkId               String?
+  identityStatus     IdentityStatus    @default(UNRESOLVED)
+  identityNote       String?
+  status             ApplicationStatus
+  submittedAt        DateTime          @db.Timestamptz(3)
+  receivedAt         DateTime          @default(now()) @db.Timestamptz(3)
+
+  decidedById        String?
+  decidedAt          DateTime?         @db.Timestamptz(3)
+  decisionSource     ActorType?
+  rejectReason       String?
+
+  cooldownLastFailedAt DateTime?       @db.Timestamptz(3)
+  cooldownUntil        DateTime?       @db.Timestamptz(3)
+
+  currentAssigneeId  String?
+  assignedAt         DateTime?         @db.Timestamptz(3)
+  completedAt        DateTime?         @db.Timestamptz(3)
+
+  candidateNotified     Boolean        @default(false)
+  candidateNotifiedById String?
+  candidateNotifiedAt   DateTime?      @db.Timestamptz(3)
+
+  createdAt          DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime          @updatedAt @db.Timestamptz(3)
+
+  candidate          Candidate?        @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+  decidedBy          User?             @relation("DecidedBy", fields: [decidedById], references: [id], onDelete: SetNull)
+  currentAssignee    User?             @relation("CurrentAssignee", fields: [currentAssigneeId], references: [id], onDelete: SetNull)
+  candidateNotifiedBy User?            @relation("NotifiedBy", fields: [candidateNotifiedById], references: [id], onDelete: SetNull)
+
+  answers            ApplicationAnswer[]
+  decision           ApplicationDecision?
+  assignments        ApplicationAssignment[]
+  callSessions       CallSession[]
+  comments           ApplicationComment[]
+  events             ApplicationEvent[]
+  deliveries         IntegrationDelivery[]
+  integrationEvents  IntegrationEvent[]
+  auditLogs          AuditLog[]
+
+  @@unique([source, externalId])
+  @@index([status, submittedAt])
+  @@index([candidateId, submittedAt])
+  @@index([vkId])
+  @@index([decidedById])
+  @@index([currentAssigneeId, status])
+  @@index([submittedAt])
+}
+
+model ApplicationAnswer {
+  id            String            @id @default(cuid())
+  applicationId Int
+  position      Int
+  question      String
+  answer        String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, position])
+}
+
+enum DecisionType {
+  APPROVED
+  REJECTED
+  AUTO_REJECTED
+}
+
+enum DecisionChannel {
+  VK_BOT
+  WEB
+  SYSTEM
+}
+
+// Решение по заявке. applicationId уникален — применяется только одно решение.
+model ApplicationDecision {
+  id            String            @id @default(cuid())
+  applicationId Int               @unique
+  decision      DecisionType
+  source        ActorType
+  channel       DecisionChannel
+  userId        String?
+  userNickname  String? // снимок ника на момент решения
+  reason        String?
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  user          User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([decision, createdAt])
+}
+
+model ApplicationAssignment {
+  id            String            @id @default(cuid())
+  applicationId Int
+  userId        String
+  assignedById  String?
+  kind          String // TAKEN | REASSIGNED
+  // = applicationId, пока закрепление действует; NULL после снятия.
+  activeKey     Int?              @unique
+  assignedAt    DateTime          @default(now()) @db.Timestamptz(3)
+  releasedAt    DateTime?         @db.Timestamptz(3)
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  user          User              @relation("AssignmentUser", fields: [userId], references: [id], onDelete: Restrict)
+  assignedBy    User?             @relation("AssignmentBy", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  @@index([applicationId])
+  @@index([userId, assignedAt])
+}
+
+enum CallSessionStatus {
+  IN_PROGRESS
+  FINISHED
+}
+
+enum CallOutcome {
+  PASSED // Прошёл
+  FAILED // Не прошёл — запускает ограничение
+  REFUSED // Отказался
+  POSTPONED // Перенос
+}
+
+model CallSession {
+  id            String            @id @default(cuid())
+  applicationId Int
+  callerId      String
+  status        CallSessionStatus @default(IN_PROGRESS)
+  // = applicationId, пока проверка идёт; не даёт начать две проверки одновременно.
+  activeKey     Int?              @unique
+  startedAt     DateTime          @default(now()) @db.Timestamptz(3)
+  endedAt       DateTime?         @db.Timestamptz(3)
+  durationSec   Int?
+  discordChannelId String?
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  caller        User              @relation(fields: [callerId], references: [id], onDelete: Restrict)
+  result        CallResult?
+  cooldown      CooldownRestriction?
+
+  @@index([applicationId])
+  @@index([callerId, endedAt])
+}
+
+model CallResult {
+  id            String      @id @default(cuid())
+  callSessionId String      @unique
+  outcome       CallOutcome
+  reason        String?
+  comment       String?
+  recordedById  String
+  createdAt     DateTime    @default(now()) @db.Timestamptz(3)
+  callSession   CallSession @relation(fields: [callSessionId], references: [id], onDelete: Cascade)
+  recordedBy    User        @relation(fields: [recordedById], references: [id], onDelete: Restrict)
+
+  @@index([outcome, createdAt])
+}
+
+model CooldownRestriction {
+  id            String      @id @default(cuid())
+  candidateId   String
+  vkId          String
+  callSessionId String      @unique
+  failedAt      DateTime    @db.Timestamptz(3)
+  endsAt        DateTime    @db.Timestamptz(3)
+  liftedAt      DateTime?   @db.Timestamptz(3)
+  liftedById    String?
+  liftReason    String?
+  createdAt     DateTime    @default(now()) @db.Timestamptz(3)
+  candidate     Candidate   @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  callSession   CallSession @relation(fields: [callSessionId], references: [id], onDelete: Cascade)
+  liftedBy      User?       @relation("CooldownLiftedBy", fields: [liftedById], references: [id], onDelete: SetNull)
+
+  @@index([vkId, failedAt])
+  @@index([candidateId, failedAt])
+}
+
+model ApplicationComment {
+  id            String            @id @default(cuid())
+  applicationId Int
+  authorId      String
+  text          String
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  author        User              @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([applicationId, createdAt])
+}
+
+// Хронология заявки/кандидата — основа «Истории кандидатов».
+model ApplicationEvent {
+  id            String             @id @default(cuid())
+  applicationId Int?
+  candidateId   String?
+  type          String
+  actorType     ActorType
+  actorId       String?
+  comment       String?
+  meta          Json?
+  createdAt     DateTime           @default(now()) @db.Timestamptz(3)
+  application   Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  candidate     Candidate?         @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+  actor         User?              @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([applicationId, createdAt])
+  @@index([candidateId, createdAt])
+  @@index([createdAt])
+}
+
+// ───────────────────────────── Журнал, уведомления, интеграции ─────────────────────────────
+
+enum AuditResult {
+  SUCCESS
+  DENIED
+  ERROR
+}
+
+model AuditLog {
+  id            String             @id @default(cuid())
+  actorType     ActorType
+  actorId       String?
+  actorLabel    String?
+  action        String
+  entityType    String?
+  entityId      String?
+  applicationId Int?
+  result        AuditResult        @default(SUCCESS)
+  details       Json?
+  ip            String?
+  createdAt     DateTime           @default(now()) @db.Timestamptz(3)
+  actor         User?              @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  application   Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@index([applicationId])
+}
+
+// Внутренние уведомления сотрудникам на сайте (не кандидатам).
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String?
+  link      String?
+  readAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+}
+
+enum IntegrationSource {
+  GOOGLE_FORMS
+  VK_CALLBACK
+  DISCORD
+}
+
+enum IntegrationEventStatus {
+  RECEIVED
+  PROCESSED
+  DUPLICATE
+  REJECTED
+  ERROR
+}
+
+// Входящие события интеграций (каждая попытка доставки).
+model IntegrationEvent {
+  id            String                 @id @default(cuid())
+  source        IntegrationSource
+  eventType     String
+  externalId    String?
+  // Ключ идемпотентности (например event_id VK). Уникален в пределах источника.
+  dedupeKey     String?
+  status        IntegrationEventStatus @default(RECEIVED)
+  payload       Json?
+  error         String?
+  applicationId Int?
+  createdAt     DateTime               @default(now()) @db.Timestamptz(3)
+  processedAt   DateTime?              @db.Timestamptz(3)
+  application   Application?     @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+
+  @@unique([source, dedupeKey])
+  @@index([source, createdAt])
+  @@index([status, createdAt])
+  @@index([externalId])
+}
+
+enum DeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+// Исходящие сообщения VK-бота сотрудникам.
+model IntegrationDelivery {
+  id                    String             @id @default(cuid())
+  channel               String             @default("VK")
+  kind                  String // APPLICATION_REVIEW | INFO | TEST
+  applicationId         Int?
+  recipientId           String?
+  peerId                String
+  status                DeliveryStatus     @default(PENDING)
+  attempts              Int                @default(0)
+  lastError             String?
+  errorCode             Int?
+  messageText           String?
+  vkMessageId           Int?
+  conversationMessageId Int?
+  createdAt             DateTime           @default(now()) @db.Timestamptz(3)
+  sentAt                DateTime?          @db.Timestamptz(3)
+  updatedAt             DateTime           @updatedAt @db.Timestamptz(3)
+  application           Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  recipient             User?              @relation(fields: [recipientId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([applicationId])
+  @@index([recipientId])
+}
+
+// Ожидание ответа сотрудника в диалоге с ботом (например, причина отказа).
+model BotConversationState {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  action        String
+  applicationId Int
+  expiresAt     DateTime @db.Timestamptz(3)
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model SystemSetting {
+  key         String   @id
+  value       Json
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+  updatedById String?
+  updatedBy   User?    @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+// Лёгкая шина событий для обновления интерфейса в реальном времени (SSE).
+model RealtimeEvent {
+  id        BigInt   @id @default(autoincrement())
+  topic     String
+  payload   Json?
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([createdAt])
+}

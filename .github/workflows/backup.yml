@@ -1,0 +1,31 @@
+name: Резервная копия БД
+
+# Ежедневный pg_dump production-базы. Секрет DATABASE_BACKUP_URL — прямое подключение (не пулер).
+# Копия хранится как артефакт workflow 30 дней. Используйте ТОЛЬКО приватный репозиторий:
+# дамп содержит персональные данные кандидатов и сотрудников.
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Установка PostgreSQL client
+        run: |
+          sudo apt-get install -y wget ca-certificates
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc > /dev/null
+          sudo apt-get update && sudo apt-get install -y postgresql-client-17
+      - name: pg_dump
+        env:
+          DATABASE_BACKUP_URL: ${{ secrets.DATABASE_BACKUP_URL }}
+        run: |
+          test -n "$DATABASE_BACKUP_URL" || { echo "Секрет DATABASE_BACKUP_URL не задан"; exit 1; }
+          /usr/lib/postgresql/17/bin/pg_dump --format=custom --no-owner --no-privileges --file=antyobzhelp.dump "$DATABASE_BACKUP_URL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antyobzhelp-${{ github.run_id }}
+          path: antyobzhelp.dump
+          retention-days: 30
